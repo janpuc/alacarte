@@ -111,7 +111,9 @@ settingsRouter.post('/apple-credentials', async (req, res) => {
       })
     }
 
-    startWrapperLogin({ email, password }).catch(() => {})
+    startWrapperLogin({ email, password }).catch((err) => {
+      console.error('[settings] startWrapperLogin crashed:', err)
+    })
     return res.json({ ok: true, loginStarted: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -138,7 +140,9 @@ settingsRouter.post('/apple-credentials/login', async (_req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'no credentials stored' })
     }
-    startWrapperLogin({ email, password }).catch(() => {})
+    startWrapperLogin({ email, password }).catch((err) => {
+      console.error('[settings] startWrapperLogin crashed:', err)
+    })
     res.json({ ok: true, loginStarted: true })
   } catch (err) {
     res.status(500).json({ error: err.message })

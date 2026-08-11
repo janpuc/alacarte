@@ -15,6 +15,13 @@ const TWOFA_FILE = path.join(
 )
 const START_SENTINEL = path.join(WRAPPER_DATA_HOST, 'start.signal')
 
+const DEBUG = process.env.WRAPPER_LOGIN_DEBUG === 'true'
+
+function debug(...args) {
+  if (!DEBUG) return
+  console.log('[wrapperLogin]', ...args)
+}
+
 let hardBlockReason = null
 
 let active = null
@@ -30,6 +37,7 @@ export function getHardBlock() {
 function emitStatus(patch) {
   if (!active) return
   active.status = { ...active.status, ...patch, ts: Date.now() }
+  debug('emit phase=', active.status.phase, 'msg=', active.status.message)
   emitEvent('wrapper.login', active.status)
 }
 
@@ -56,8 +64,12 @@ async function unlinkIfExists(p) {
 }
 
 export async function startWrapperLogin({ email, password }) {
-  if (active) return { ok: false, reason: 'login already in progress' }
+  if (active) {
+    debug('startWrapperLogin rejected: already in progress')
+    return { ok: false, reason: 'login already in progress' }
+  }
 
+  debug('startWrapperLogin begin; host=', WRAPPER_DATA_HOST)
   active = { status: { phase: 'preparing', message: 'queueing credentials' } }
   emitStatus({ phase: 'preparing' })
 
@@ -70,6 +82,7 @@ export async function startWrapperLogin({ email, password }) {
       JSON.stringify({ email, password, ts: Date.now() }),
       { mode: 0o600 },
     )
+    debug('wrote creds.json at', CREDS_FILE)
     emitStatus({
       phase: '2fa-required',
       message:
@@ -77,6 +90,7 @@ export async function startWrapperLogin({ email, password }) {
     })
     return { ok: true }
   } catch (err) {
+    debug('startWrapperLogin failed:', err)
     active = null
     emitEvent('wrapper.login', { phase: 'failed', message: err.message })
     return { ok: false, reason: err.message }
@@ -84,18 +98,24 @@ export async function startWrapperLogin({ email, password }) {
 }
 
 export async function submit2FA(code) {
-  if (!active) return { ok: false, reason: 'no login in progress' }
+  if (!active) {
+    debug('submit2FA rejected: no login in progress')
+    return { ok: false, reason: 'no login in progress' }
+  }
   try {
     await fsp.writeFile(TWOFA_FILE, code.trim(), { mode: 0o600 })
+    debug('wrote 2fa.txt at', TWOFA_FILE)
     await fsp.writeFile(START_SENTINEL, JSON.stringify({ ts: Date.now() }), {
       mode: 0o600,
     })
+    debug('wrote start.signal at', START_SENTINEL)
     emitStatus({
       phase: 'verifying-2fa',
       message: '2FA written — wrapper starting',
     })
     return { ok: true }
   } catch (err) {
+    debug('submit2FA failed:', err)
     return { ok: false, reason: err.message }
   }
 }

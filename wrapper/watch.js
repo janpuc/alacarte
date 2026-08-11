@@ -10,6 +10,16 @@ const START_SENTINEL = `${DATA_DIR}/start.signal`;
 const CACHE_DIR = TWOFA_DIR;
 const WRAPPER = '/app/wrapper';
 const HEALTH_PORT = 11020;
+const DEBUG = process.env.WRAPPER_DEBUG === 'true';
+
+function log(...args) {
+  console.log(`[watcher ${new Date().toISOString()}]`, ...args);
+}
+
+function debug(...args) {
+  if (!DEBUG) return;
+  log('[debug]', ...args);
+}
 
 function exists(p) {
   try {
@@ -27,7 +37,8 @@ function readCreds() {
     const creds = JSON.parse(raw);
     if (!creds.email || !creds.password) return null;
     return creds;
-  } catch {
+  } catch (err) {
+    debug('readCreds error:', err.message);
     return null;
   }
 }
@@ -35,7 +46,8 @@ function readCreds() {
 function hasCachedSession() {
   try {
     return fs.readdirSync(CACHE_DIR).length > 0;
-  } catch {
+  } catch (err) {
+    debug('hasCachedSession error:', err.message);
     return false;
   }
 }
@@ -43,9 +55,22 @@ function hasCachedSession() {
 function consume(p) {
   try {
     fs.unlinkSync(p);
+    debug('consumed', p);
   } catch (err) {
-    if (err && err.code !== 'ENOENT') throw err;
+    if (err && err.code !== 'ENOENT') {
+      debug('consume error for', p, err.message);
+      throw err;
+    }
   }
+}
+
+function snapshotState() {
+  return {
+    creds: exists(CREDS_PATH),
+    startSentinel: exists(START_SENTINEL),
+    twoFa: exists(`${TWOFA_DIR}/2fa.txt`),
+    cache: hasCachedSession(),
+  };
 }
 
 const healthState = { alive: true, lastRestart: null, restartCount: 0 };
@@ -58,6 +83,9 @@ const healthServer = http.createServer((req, res) => {
     const ready = hasCachedSession() || Boolean(readCreds());
     res.writeHead(ready ? 200 : 503);
     res.end(ready ? 'ready' : 'no creds, no cache');
+  } else if (req.url === '/debug/state') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(snapshotState(), null, 2));
   } else {
     res.writeHead(404);
     res.end();
@@ -65,11 +93,12 @@ const healthServer = http.createServer((req, res) => {
 });
 
 healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
-  console.log(`[watcher] health server listening on :${HEALTH_PORT}`);
+  log(`health server listening on :${HEALTH_PORT} debug=${DEBUG}`);
 });
 
 function runWrapper(args) {
   return new Promise((resolve) => {
+    debug('spawning wrapper with args=', args);
     const child = spawn(WRAPPER, args, {
       stdio: 'inherit',
       detached: false,
@@ -83,22 +112,29 @@ function runWrapper(args) {
 async function runOnce(args, label) {
   healthState.lastRestart = new Date().toISOString();
   healthState.restartCount += 1;
-  console.log(`[watcher] starting wrapper (${label})`);
+  log(`starting wrapper (${label}) args=${JSON.stringify(args)}`);
   const result = await runWrapper(args);
-  console.log(
-    `[watcher] wrapper exited code=${result.code} signal=${result.signal} (${label})`,
-  );
+  log(`wrapper exited code=${result.code} signal=${result.signal} (${label})`);
   return result;
 }
 
 async function main() {
-  console.log('[watcher] starting; awaiting credentials and 2FA');
+  log('starting; awaiting credentials and 2FA');
+  log('initial state:', JSON.stringify(snapshotState()));
+
+  let lastHeartbeat = 0;
 
   while (true) {
     const creds = readCreds();
     const wantsLogin = creds !== null && exists(START_SENTINEL);
 
+    if (DEBUG && Date.now() - lastHeartbeat > 5000) {
+      log('heartbeat state=', JSON.stringify(snapshotState()));
+      lastHeartbeat = Date.now();
+    }
+
     if (wantsLogin) {
+      log('login requested — consuming sentinel + creds + 2fa');
       consume(START_SENTINEL);
       consume(CREDS_PATH);
       consume(`${TWOFA_DIR}/2fa.txt`);
@@ -106,20 +142,18 @@ async function main() {
       const args = ['-L', `${creds.email}:${creds.password}`, '-F'];
       const result = await runOnce(args, 'login');
       if (!hasCachedSession()) {
-        console.log(
-          `[watcher] no cached session after login (code=${result.code}); waiting before retry`,
-        );
+        log(`no cached session after login (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));
       } else {
-        console.log('[watcher] cached session present after login; healthy');
+        log('cached session present after login; healthy');
       }
       continue;
     }
 
     if (creds) {
-      console.log(
-        '[watcher] creds present but no 2FA yet; waiting for user to submit 2FA',
-      );
+      if (DEBUG) {
+        log('creds present but no start.signal; waiting for 2FA submit');
+      }
       await new Promise((r) => setTimeout(r, 1000));
       continue;
     }
@@ -127,9 +161,7 @@ async function main() {
     if (hasCachedSession()) {
       const result = await runOnce([], 'cached-session');
       if (!hasCachedSession()) {
-        console.log(
-          `[watcher] cache gone after run (code=${result.code}); waiting before retry`,
-        );
+        log(`cache gone after run (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));
       }
       continue;
