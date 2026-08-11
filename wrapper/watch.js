@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 
 const DATA_DIR = '/app/rootfs/data';
 const CREDS_PATH = `${DATA_DIR}/creds.json`;
+const TWOFA_PIPE = `${DATA_DIR}/twofa.pipe`;
 const TWOFA_DIR = `${DATA_DIR}/data/data/com.apple.android.music/files`;
 const CACHE_DIR = TWOFA_DIR;
 const WRAPPER = '/app/wrapper';
@@ -42,6 +43,19 @@ function readCreds() {
   }
 }
 
+function readTwofa() {
+  if (!exists(TWOFA_PIPE)) return null;
+  try {
+    const raw = fs.readFileSync(TWOFA_PIPE, 'utf8');
+    const code = raw.replace(/\s+/g, '');
+    if (!/^\d{4,8}$/.test(code)) return null;
+    return code;
+  } catch (err) {
+    debug('readTwofa error:', err.message);
+    return null;
+  }
+}
+
 function hasCachedSession() {
   try {
     return fs.readdirSync(CACHE_DIR).length > 0;
@@ -66,7 +80,7 @@ function consume(p) {
 function snapshotState() {
   return {
     creds: exists(CREDS_PATH),
-    twoFa: exists(`${TWOFA_DIR}/2fa.txt`),
+    twoFaPipe: exists(TWOFA_PIPE),
     cache: hasCachedSession(),
   };
 }
@@ -94,24 +108,67 @@ healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
   log(`health server listening on :${HEALTH_PORT} debug=${DEBUG}`);
 });
 
-function runWrapper(args) {
+function redactArgs(args) {
+  return args.map((a) => {
+    if (typeof a !== 'string') return a;
+    const colon = a.indexOf(':');
+    if (colon !== -1 && a.includes('@')) return `${a.slice(0, colon)}:***`;
+    return a;
+  });
+}
+
+function runWrapperLogin(creds, twofa) {
   return new Promise((resolve) => {
-    debug('spawning wrapper with args=', args);
+    const args = ['-L', `${creds.email}:${creds.password}`];
+    debug('spawning wrapper with args=', redactArgs(args));
+    const devnull = fs.openSync('/dev/null', 'w');
     const child = spawn(WRAPPER, args, {
-      stdio: 'inherit',
+      stdio: ['pipe', devnull, devnull],
       detached: false,
     });
+    let stdinClosed = false;
+    function closeStdin() {
+      if (stdinClosed) return;
+      stdinClosed = true;
+      try { child.stdin.end(); } catch {}
+    }
+    if (twofa) {
+      child.stdin.write(twofa + '\n', (err) => {
+        if (err) debug('stdin write error:', err.message);
+        closeStdin();
+      });
+    } else {
+      closeStdin();
+    }
     child.on('exit', (code, signal) => {
+      try { fs.closeSync(devnull); } catch {}
       resolve({ code, signal });
     });
   });
 }
 
-async function runOnce(args, label) {
+function runWrapperCached() {
+  return new Promise((resolve) => {
+    debug('spawning wrapper (cached session)');
+    const devnull = fs.openSync('/dev/null', 'w');
+    const child = spawn(WRAPPER, [], {
+      stdio: ['ignore', devnull, devnull],
+      detached: false,
+    });
+    child.on('exit', (code, signal) => {
+      try { fs.closeSync(devnull); } catch {}
+      resolve({ code, signal });
+    });
+  });
+}
+
+async function runLogin(creds, twofa, label) {
   healthState.lastRestart = new Date().toISOString();
   healthState.restartCount += 1;
-  log(`starting wrapper (${label}) args=${JSON.stringify(args)}`);
-  const result = await runWrapper(args);
+  log(`starting wrapper (${label})`);
+  const result = twofa
+    ? await runWrapperLogin(creds, twofa)
+    : await runWrapperLogin(creds, null);
   log(`wrapper exited code=${result.code} signal=${result.signal} (${label})`);
   return result;
 }
@@ -151,11 +208,11 @@ async function main() {
     }
 
     if (creds) {
-      log('creds present — starting wrapper with -L -F (it will poll 2fa.txt)');
-      const args = ['-L', `${creds.email}:${creds.password}`, '-F'];
-      const result = await runOnce(args, 'login');
+      const twofa = readTwofa();
+      log(`creds present, twofa=${twofa ? 'ready' : 'waiting'}; launching wrapper`);
+      const result = await runLogin(creds, twofa, 'login');
       consume(CREDS_PATH);
-      consume(`${TWOFA_DIR}/2fa.txt`);
+      consume(TWOFA_PIPE);
       if (!hasCachedSession()) {
         log(`no cached session after login (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));
@@ -166,7 +223,7 @@ async function main() {
     }
 
     if (hasCachedSession()) {
-      const result = await runOnce([], 'cached-session');
+      const result = await runWrapperCached();
       if (!hasCachedSession()) {
         log(`cache gone after run (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));

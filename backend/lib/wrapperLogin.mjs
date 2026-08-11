@@ -5,14 +5,7 @@ import { emitEvent } from './eventBus.mjs'
 
 const WRAPPER_DATA_HOST = process.env.WRAPPER_DATA_HOST || '/wrapper-data'
 const CREDS_FILE = path.join(WRAPPER_DATA_HOST, 'creds.json')
-const TWOFA_FILE = path.join(
-  WRAPPER_DATA_HOST,
-  'data',
-  'data',
-  'com.apple.android.music',
-  'files',
-  '2fa.txt',
-)
+const TWOFA_PIPE = path.join(WRAPPER_DATA_HOST, 'twofa.pipe')
 
 const DEBUG = process.env.WRAPPER_LOGIN_DEBUG === 'true'
 
@@ -74,7 +67,6 @@ export async function startWrapperLogin({ email, password }) {
 
   try {
     await fsp.mkdir(WRAPPER_DATA_HOST, { recursive: true })
-    await fsp.mkdir(path.dirname(TWOFA_FILE), { recursive: true })
     await fsp.writeFile(
       CREDS_FILE,
       JSON.stringify({ email, password, ts: Date.now() }),
@@ -101,8 +93,9 @@ export async function submit2FA(code) {
     return { ok: false, reason: 'no login in progress' }
   }
   try {
-    await fsp.writeFile(TWOFA_FILE, code.trim(), { mode: 0o600 })
-    debug('wrote 2fa.txt at', TWOFA_FILE)
+    const cleaned = code.replace(/\s+/g, '')
+    await fsp.writeFile(TWOFA_PIPE, cleaned, { mode: 0o600 })
+    debug('wrote twofa.pipe')
     emitStatus({
       phase: 'verifying-2fa',
       message: '2FA submitted; completing sign-in',
@@ -116,7 +109,7 @@ export async function submit2FA(code) {
 
 export async function cancelLogin() {
   active = null
-  await Promise.all([unlinkIfExists(CREDS_FILE), unlinkIfExists(TWOFA_FILE)])
+  await Promise.all([unlinkIfExists(CREDS_FILE), unlinkIfExists(TWOFA_PIPE)])
   emitEvent('wrapper.login', { phase: 'cancelled' })
   return { ok: true }
 }

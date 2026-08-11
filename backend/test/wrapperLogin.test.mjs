@@ -79,7 +79,7 @@ test('startWrapperLogin writes creds.json and emits 2fa-required phase', async (
   await cancelLogin()
 })
 
-test('submit2FA writes 2fa.txt and emits verifying-2fa', async () => {
+test('submit2FA writes twofa.pipe and emits verifying-2fa', async () => {
   await cancelLogin()
   events.length = 0
 
@@ -90,17 +90,10 @@ test('submit2FA writes 2fa.txt and emits verifying-2fa', async () => {
   const r = await submit2FA('123456')
   assert.equal(r.ok, true)
 
-  const twoFaPath = path.join(
-    tmp,
-    'data',
-    'data',
-    'com.apple.android.music',
-    'files',
-    '2fa.txt',
-  )
-  assert.equal(await fsp.readFile(twoFaPath, 'utf8'), '123456')
-  const twoFaStat = await fsp.stat(twoFaPath)
-  assert.equal(twoFaStat.mode & 0o777, 0o600)
+  const pipePath = path.join(tmp, 'twofa.pipe')
+  assert.equal(await fsp.readFile(pipePath, 'utf8'), '123456')
+  const pipeStat = await fsp.stat(pipePath)
+  assert.equal(pipeStat.mode & 0o777, 0o600)
 
   const phases = phaseEvents().map((d) => d.phase)
   assert.ok(phases.includes('verifying-2fa'), `got: ${JSON.stringify(phases)}`)
@@ -108,20 +101,13 @@ test('submit2FA writes 2fa.txt and emits verifying-2fa', async () => {
   await cancelLogin()
 })
 
-test('submit2FA trims whitespace from the 2FA code', async () => {
+test('submit2FA strips whitespace from the 2FA code', async () => {
   await cancelLogin()
   await startWrapperLogin({ email: 'x@y.com', password: 'pw' })
   const r = await submit2FA('  987654 \n')
   assert.equal(r.ok, true)
-  const twoFaPath = path.join(
-    tmp,
-    'data',
-    'data',
-    'com.apple.android.music',
-    'files',
-    '2fa.txt',
-  )
-  assert.equal(await fsp.readFile(twoFaPath, 'utf8'), '987654')
+  const pipePath = path.join(tmp, 'twofa.pipe')
+  assert.equal(await fsp.readFile(pipePath, 'utf8'), '987654')
   await cancelLogin()
 })
 
@@ -132,24 +118,18 @@ test('submit2FA rejects when no login is in progress', async () => {
   assert.match(r.reason, /no login in progress/i)
 })
 
-test('cancelLogin removes creds.json and 2fa.txt', async () => {
+test('cancelLogin removes creds.json and twofa.pipe', async () => {
   await startWrapperLogin({ email: 'x@y.com', password: 'pw' })
   await submit2FA('111111')
 
-  for (const rel of [
-    'creds.json',
-    'data/data/com.apple.android.music/files/2fa.txt',
-  ]) {
+  for (const rel of ['creds.json', 'twofa.pipe']) {
     const p = path.join(tmp, rel)
     assert.equal(await fsp.access(p).then(() => true, () => false), true, rel)
   }
 
   await cancelLogin()
 
-  for (const rel of [
-    'creds.json',
-    'data/data/com.apple.android.music/files/2fa.txt',
-  ]) {
+  for (const rel of ['creds.json', 'twofa.pipe']) {
     const p = path.join(tmp, rel)
     assert.equal(await fsp.access(p).then(() => true, () => false), false, rel)
   }
