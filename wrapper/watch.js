@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
-const net = require('node:net');
 const { spawn } = require('node:child_process');
 
 const CREDS_PATH = '/app/rootfs/data/creds.json';
 const CACHE_PATH = '/app/rootfs/data/data/com.apple.android.music/files';
 const WRAPPER = '/app/wrapper';
-const READY_PORT = 10020;
-const READY_HOST = '127.0.0.1';
+const HEALTH_PORT = 11020;
 
 function readCreds() {
   try {
@@ -23,8 +22,7 @@ function readCreds() {
 
 function hasCachedSession() {
   try {
-    const entries = fs.readdirSync(CACHE_PATH);
-    return entries.length > 0;
+    return fs.readdirSync(CACHE_PATH).length > 0;
   } catch {
     return false;
   }
@@ -38,26 +36,30 @@ function consumeCreds() {
   }
 }
 
-async function waitForReady(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ok = await new Promise((resolve) => {
-      const sock = net.createConnection({ port: READY_PORT, host: READY_HOST });
-      sock.once('connect', () => {
-        sock.end();
-        resolve(true);
-      });
-      sock.once('error', () => resolve(false));
-      setTimeout(() => {
-        sock.destroy();
-        resolve(false);
-      }, 500).unref();
-    });
-    if (ok) return true;
-    await new Promise((r) => setTimeout(r, 500));
+const healthState = { alive: false, lastRestart: null, restartCount: 0 };
+
+const healthServer = http.createServer((req, res) => {
+  if (req.url === '/healthz') {
+    res.writeHead(healthState.alive ? 200 : 503);
+    res.end(
+      healthState.alive ? 'ok' : 'starting',
+    );
+  } else if (req.url === '/readyz') {
+    const hasCreds = Boolean(readCreds());
+    const cached = hasCachedSession();
+    const ready = cached || hasCreds;
+    res.writeHead(ready ? 200 : 503);
+    res.end(ready ? 'ready' : 'no creds, no cache');
+  } else {
+    res.writeHead(404);
+    res.end();
   }
-  return false;
-}
+});
+
+healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
+  console.log(`[watcher] health server listening on :${HEALTH_PORT}`);
+});
+healthState.alive = true;
 
 function runWrapper(args) {
   return new Promise((resolve) => {
@@ -102,6 +104,8 @@ async function main() {
       );
     }
 
+    healthState.lastRestart = new Date().toISOString();
+    healthState.restartCount += 1;
     const result = await runWrapper(args);
 
     if (creds) {
