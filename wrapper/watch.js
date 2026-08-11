@@ -213,6 +213,7 @@ async function main() {
   } catch (err) {
     log('chown failed:', err.message);
   }
+  consume(TWOFA_PIPE);
   log('initial state:', JSON.stringify(snapshotState()));
 
   let lastHeartbeat = 0;

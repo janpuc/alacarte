@@ -111,6 +111,10 @@ export async function startWrapperLogin({ email, password }) {
     return { ok: false, reason: 'login already in progress' }
   }
 
+  stopReadyPoll()
+  await unlinkIfExists(TWOFA_PIPE)
+  await unlinkIfExists(CREDS_FILE)
+
   debug('startWrapperLogin begin; host=', WRAPPER_DATA_HOST)
   active = { status: { phase: 'signing-in', message: 'sending credentials to Apple' } }
   emitStatus({ phase: 'signing-in' })
