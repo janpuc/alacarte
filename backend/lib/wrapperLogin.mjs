@@ -13,7 +13,6 @@ const TWOFA_FILE = path.join(
   'files',
   '2fa.txt',
 )
-const START_SENTINEL = path.join(WRAPPER_DATA_HOST, 'start.signal')
 
 const DEBUG = process.env.WRAPPER_LOGIN_DEBUG === 'true'
 
@@ -70,13 +69,12 @@ export async function startWrapperLogin({ email, password }) {
   }
 
   debug('startWrapperLogin begin; host=', WRAPPER_DATA_HOST)
-  active = { status: { phase: 'preparing', message: 'queueing credentials' } }
-  emitStatus({ phase: 'preparing' })
+  active = { status: { phase: 'signing-in', message: 'sending credentials to Apple' } }
+  emitStatus({ phase: 'signing-in' })
 
   try {
     await fsp.mkdir(WRAPPER_DATA_HOST, { recursive: true })
     await fsp.mkdir(path.dirname(TWOFA_FILE), { recursive: true })
-    await unlinkIfExists(START_SENTINEL)
     await fsp.writeFile(
       CREDS_FILE,
       JSON.stringify({ email, password, ts: Date.now() }),
@@ -86,7 +84,7 @@ export async function startWrapperLogin({ email, password }) {
     emitStatus({
       phase: '2fa-required',
       message:
-        'credentials written — submit the 2FA code from your Apple device to start the wrapper',
+        'check your trusted Apple device for a 6-digit verification code, then enter it here',
     })
     return { ok: true }
   } catch (err) {
@@ -105,13 +103,9 @@ export async function submit2FA(code) {
   try {
     await fsp.writeFile(TWOFA_FILE, code.trim(), { mode: 0o600 })
     debug('wrote 2fa.txt at', TWOFA_FILE)
-    await fsp.writeFile(START_SENTINEL, JSON.stringify({ ts: Date.now() }), {
-      mode: 0o600,
-    })
-    debug('wrote start.signal at', START_SENTINEL)
     emitStatus({
       phase: 'verifying-2fa',
-      message: '2FA written — wrapper starting',
+      message: '2FA submitted; completing sign-in',
     })
     return { ok: true }
   } catch (err) {
@@ -122,11 +116,7 @@ export async function submit2FA(code) {
 
 export async function cancelLogin() {
   active = null
-  await Promise.all([
-    unlinkIfExists(CREDS_FILE),
-    unlinkIfExists(TWOFA_FILE),
-    unlinkIfExists(START_SENTINEL),
-  ])
+  await Promise.all([unlinkIfExists(CREDS_FILE), unlinkIfExists(TWOFA_FILE)])
   emitEvent('wrapper.login', { phase: 'cancelled' })
   return { ok: true }
 }

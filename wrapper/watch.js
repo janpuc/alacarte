@@ -6,7 +6,6 @@ const { spawn } = require('node:child_process');
 const DATA_DIR = '/app/rootfs/data';
 const CREDS_PATH = `${DATA_DIR}/creds.json`;
 const TWOFA_DIR = `${DATA_DIR}/data/data/com.apple.android.music/files`;
-const START_SENTINEL = `${DATA_DIR}/start.signal`;
 const CACHE_DIR = TWOFA_DIR;
 const WRAPPER = '/app/wrapper';
 const HEALTH_PORT = 11020;
@@ -67,7 +66,6 @@ function consume(p) {
 function snapshotState() {
   return {
     creds: exists(CREDS_PATH),
-    startSentinel: exists(START_SENTINEL),
     twoFa: exists(`${TWOFA_DIR}/2fa.txt`),
     cache: hasCachedSession(),
   };
@@ -132,7 +130,7 @@ async function chownTree(p, uid, gid) {
 }
 
 async function main() {
-  log('starting; awaiting credentials and 2FA');
+  log('starting; awaiting credentials');
   try {
     fs.chownSync(DATA_DIR, 1000, 1000);
     await chownTree(DATA_DIR, 1000, 1000);
@@ -146,35 +144,24 @@ async function main() {
 
   while (true) {
     const creds = readCreds();
-    const wantsLogin = creds !== null && exists(START_SENTINEL);
 
     if (DEBUG && Date.now() - lastHeartbeat > 5000) {
       log('heartbeat state=', JSON.stringify(snapshotState()));
       lastHeartbeat = Date.now();
     }
 
-    if (wantsLogin) {
-      log('login requested — consuming sentinel + creds + 2fa');
-      consume(START_SENTINEL);
-      consume(CREDS_PATH);
-      consume(`${TWOFA_DIR}/2fa.txt`);
-
+    if (creds) {
+      log('creds present — starting wrapper with -L -F (it will poll 2fa.txt)');
       const args = ['-L', `${creds.email}:${creds.password}`, '-F'];
       const result = await runOnce(args, 'login');
+      consume(CREDS_PATH);
+      consume(`${TWOFA_DIR}/2fa.txt`);
       if (!hasCachedSession()) {
         log(`no cached session after login (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));
       } else {
         log('cached session present after login; healthy');
       }
-      continue;
-    }
-
-    if (creds) {
-      if (DEBUG) {
-        log('creds present but no start.signal; waiting for 2FA submit');
-      }
-      await new Promise((r) => setTimeout(r, 1000));
       continue;
     }
 

@@ -61,13 +61,7 @@ test('startWrapperLogin writes creds.json and emits 2fa-required phase', async (
   const stat = await fsp.stat(credsPath)
   assert.equal(stat.mode & 0o777, 0o600)
 
-  assert.equal(
-    await fsp.access(path.join(tmp, 'start.signal')).then(() => true, () => false),
-    false,
-  )
-
   const phases = phaseEvents().map((d) => d.phase)
-  assert.ok(phases.includes('preparing'), `got phases: ${JSON.stringify(phases)}`)
   assert.ok(phases.includes('2fa-required'), `got phases: ${JSON.stringify(phases)}`)
 
   for (const d of phaseEvents()) {
@@ -85,7 +79,7 @@ test('startWrapperLogin writes creds.json and emits 2fa-required phase', async (
   await cancelLogin()
 })
 
-test('submit2FA writes 2fa.txt and start.signal and emits verifying-2fa', async () => {
+test('submit2FA writes 2fa.txt and emits verifying-2fa', async () => {
   await cancelLogin()
   events.length = 0
 
@@ -107,11 +101,6 @@ test('submit2FA writes 2fa.txt and start.signal and emits verifying-2fa', async 
   assert.equal(await fsp.readFile(twoFaPath, 'utf8'), '123456')
   const twoFaStat = await fsp.stat(twoFaPath)
   assert.equal(twoFaStat.mode & 0o777, 0o600)
-
-  const startPath = path.join(tmp, 'start.signal')
-  const startRaw = await fsp.readFile(startPath, 'utf8')
-  const startParsed = JSON.parse(startRaw)
-  assert.equal(typeof startParsed.ts, 'number')
 
   const phases = phaseEvents().map((d) => d.phase)
   assert.ok(phases.includes('verifying-2fa'), `got: ${JSON.stringify(phases)}`)
@@ -143,13 +132,12 @@ test('submit2FA rejects when no login is in progress', async () => {
   assert.match(r.reason, /no login in progress/i)
 })
 
-test('cancelLogin removes creds.json, 2fa.txt, and start.signal', async () => {
+test('cancelLogin removes creds.json and 2fa.txt', async () => {
   await startWrapperLogin({ email: 'x@y.com', password: 'pw' })
   await submit2FA('111111')
 
   for (const rel of [
     'creds.json',
-    'start.signal',
     'data/data/com.apple.android.music/files/2fa.txt',
   ]) {
     const p = path.join(tmp, rel)
@@ -160,29 +148,11 @@ test('cancelLogin removes creds.json, 2fa.txt, and start.signal', async () => {
 
   for (const rel of [
     'creds.json',
-    'start.signal',
     'data/data/com.apple.android.music/files/2fa.txt',
   ]) {
     const p = path.join(tmp, rel)
     assert.equal(await fsp.access(p).then(() => true, () => false), false, rel)
   }
-})
-
-test('startWrapperLogin cleans stale start.signal before writing creds', async () => {
-  await fsp.mkdir(tmp, { recursive: true })
-  const stale = path.join(tmp, 'start.signal')
-  await fsp.writeFile(stale, 'leftover')
-
-  const r = await startWrapperLogin({ email: 'x@y.com', password: 'pw' })
-  assert.equal(r.ok, true)
-  assert.equal(
-    await fsp.readFile(stale, 'utf8').then(
-      () => true,
-      () => false,
-    ),
-    false,
-  )
-  await cancelLogin()
 })
 
 test('clearHardBlock and getHardBlock manage the hard-block reason', () => {
