@@ -63,11 +63,9 @@ export async function startWrapperLogin({ email, password }) {
 export async function submit2FA(code) {
   if (!active) return { ok: false, reason: 'no login in progress' }
   try {
-    await fsp.writeFile(
-      path.join(WRAPPER_DATA_HOST, '2fa.txt'),
-      code.trim(),
-      { mode: 0o600 },
-    )
+    const dir = path.join(WRAPPER_DATA_HOST, 'data', 'data', 'com.apple.android.music', 'files')
+    await fsp.mkdir(dir, { recursive: true })
+    await fsp.writeFile(path.join(dir, '2fa.txt'), code.trim(), { mode: 0o600 })
     emitStatus({ state: 'awaiting-2fa', message: '2FA code written' })
     return { ok: true }
   } catch (err) {
