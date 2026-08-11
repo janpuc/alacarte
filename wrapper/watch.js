@@ -118,8 +118,28 @@ async function runOnce(args, label) {
   return result;
 }
 
+async function chownTree(p, uid, gid) {
+  try {
+    const entries = fs.readdirSync(p, { withFileTypes: true });
+    for (const e of entries) {
+      const child = `${p}/${e.name}`;
+      fs.chownSync(child, uid, gid);
+      if (e.isDirectory()) await chownTree(child, uid, gid);
+    }
+  } catch (err) {
+    debug('chownTree skip', p, err.message);
+  }
+}
+
 async function main() {
   log('starting; awaiting credentials and 2FA');
+  try {
+    fs.chownSync(DATA_DIR, 1000, 1000);
+    await chownTree(DATA_DIR, 1000, 1000);
+    log('chowned data tree to 1000:1000');
+  } catch (err) {
+    log('chown failed:', err.message);
+  }
   log('initial state:', JSON.stringify(snapshotState()));
 
   let lastHeartbeat = 0;
