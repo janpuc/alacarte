@@ -9,7 +9,6 @@ const TWOFA_PIPE = path.join(WRAPPER_DATA_HOST, 'twofa.pipe')
 const CACHE_DIR = path.join(
   WRAPPER_DATA_HOST,
   'data',
-  'data',
   'com.apple.android.music',
   'files',
 )

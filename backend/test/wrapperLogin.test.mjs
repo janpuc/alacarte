@@ -141,11 +141,11 @@ test('clearHardBlock and getHardBlock manage the hard-block reason', () => {
 
 test('submit2FA emits ready when cached session already exists', async () => {
   await cancelLogin()
-  await fsp.mkdir(path.join(tmp, 'data', 'data', 'com.apple.android.music', 'files'), {
+  await fsp.mkdir(path.join(tmp, 'data', 'com.apple.android.music', 'files'), {
     recursive: true,
   })
   await fsp.writeFile(
-    path.join(tmp, 'data', 'data', 'com.apple.android.music', 'files', 'marker'),
+    path.join(tmp, 'data', 'com.apple.android.music', 'files', 'marker'),
     'x',
   )
   events.length = 0
