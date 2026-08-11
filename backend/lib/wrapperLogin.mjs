@@ -6,6 +6,15 @@ import { emitEvent } from './eventBus.mjs'
 const WRAPPER_DATA_HOST = process.env.WRAPPER_DATA_HOST || '/wrapper-data'
 const CREDS_FILE = path.join(WRAPPER_DATA_HOST, 'creds.json')
 const TWOFA_PIPE = path.join(WRAPPER_DATA_HOST, 'twofa.pipe')
+const CACHE_DIR = path.join(
+  WRAPPER_DATA_HOST,
+  'data',
+  'data',
+  'com.apple.android.music',
+  'files',
+)
+const READY_TIMEOUT_MS = 5 * 60 * 1000
+const READY_POLL_MS = 1500
 
 const DEBUG = process.env.WRAPPER_LOGIN_DEBUG === 'true'
 
@@ -55,6 +64,47 @@ async function unlinkIfExists(p) {
   }
 }
 
+async function hasCachedSession() {
+  try {
+    const entries = await fsp.readdir(CACHE_DIR)
+    return entries.length > 0
+  } catch {
+    return false
+  }
+}
+
+let readyTimer = null
+
+function stopReadyPoll() {
+  if (readyTimer) {
+    clearInterval(readyTimer)
+    readyTimer = null
+  }
+}
+
+function startReadyPoll() {
+  stopReadyPoll()
+  const startedAt = Date.now()
+  const poll = async () => {
+    if (!active) {
+      stopReadyPoll()
+      return
+    }
+    if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+      stopReadyPoll()
+      emitStatus({ phase: 'failed', message: 'login timed out after 5 minutes' })
+      active = null
+      return
+    }
+    if (await hasCachedSession()) {
+      stopReadyPoll()
+      emitStatus({ phase: 'ready', message: 'signed in successfully' })
+      active = null
+    }
+  }
+  readyTimer = setInterval(poll, READY_POLL_MS)
+}
+
 export async function startWrapperLogin({ email, password }) {
   if (active) {
     debug('startWrapperLogin rejected: already in progress')
@@ -67,6 +117,12 @@ export async function startWrapperLogin({ email, password }) {
 
   try {
     await fsp.mkdir(WRAPPER_DATA_HOST, { recursive: true })
+    if (await hasCachedSession()) {
+      debug('cached session already present; emitting ready')
+      emitStatus({ phase: 'ready', message: 'already signed in' })
+      active = null
+      return { ok: true }
+    }
     await fsp.writeFile(
       CREDS_FILE,
       JSON.stringify({ email, password, ts: Date.now() }),
@@ -100,6 +156,12 @@ export async function submit2FA(code) {
       phase: 'verifying-2fa',
       message: '2FA submitted; completing sign-in',
     })
+    if (await hasCachedSession()) {
+      emitStatus({ phase: 'ready', message: 'already signed in' })
+      active = null
+    } else {
+      startReadyPoll()
+    }
     return { ok: true }
   } catch (err) {
     debug('submit2FA failed:', err)
@@ -108,6 +170,7 @@ export async function submit2FA(code) {
 }
 
 export async function cancelLogin() {
+  stopReadyPoll()
   active = null
   await Promise.all([unlinkIfExists(CREDS_FILE), unlinkIfExists(TWOFA_PIPE)])
   emitEvent('wrapper.login', { phase: 'cancelled' })

@@ -117,6 +117,8 @@ function redactArgs(args) {
   });
 }
 
+let activeChild = null;
+
 function runWrapperLogin(creds, twofa) {
   return new Promise((resolve) => {
     const args = ['-L', `${creds.email}:${creds.password}`];
@@ -126,6 +128,7 @@ function runWrapperLogin(creds, twofa) {
       stdio: ['pipe', devnull, devnull],
       detached: false,
     });
+    activeChild = child;
     let stdinClosed = false;
     function closeStdin() {
       if (stdinClosed) return;
@@ -138,9 +141,22 @@ function runWrapperLogin(creds, twofa) {
         closeStdin();
       });
     } else {
-      closeStdin();
+      const stdinPoll = setInterval(() => {
+        const code = readTwofa();
+        if (!code) return;
+        clearInterval(stdinPoll);
+        log('twofa code arrived; writing to wrapper stdin');
+        child.stdin.write(code + '\n', (err) => {
+          if (err) debug('stdin write error:', err.message);
+          closeStdin();
+        });
+      }, 500);
+      child.stdin.on('error', () => {
+        clearInterval(stdinPoll);
+      });
     }
     child.on('exit', (code, signal) => {
+      activeChild = null;
       try { fs.closeSync(devnull); } catch {}
       resolve({ code, signal });
     });
@@ -155,7 +171,9 @@ function runWrapperCached() {
       stdio: ['ignore', devnull, devnull],
       detached: false,
     });
+    activeChild = child;
     child.on('exit', (code, signal) => {
+      activeChild = null;
       try { fs.closeSync(devnull); } catch {}
       resolve({ code, signal });
     });
@@ -210,9 +228,25 @@ async function main() {
     if (creds) {
       const twofa = readTwofa();
       log(`creds present, twofa=${twofa ? 'ready' : 'waiting'}; launching wrapper`);
+      let cancelled = false;
+      const cancelPoll = setInterval(() => {
+        if (!exists(CREDS_PATH)) {
+          cancelled = true;
+          log('creds.json disappeared (cancel); killing wrapper');
+          if (activeChild && !activeChild.killed) {
+            try { activeChild.kill('SIGTERM'); } catch {}
+          }
+          clearInterval(cancelPoll);
+        }
+      }, 500);
       const result = await runLogin(creds, twofa, 'login');
+      clearInterval(cancelPoll);
       consume(CREDS_PATH);
       consume(TWOFA_PIPE);
+      if (cancelled) {
+        log('login cancelled');
+        continue;
+      }
       if (!hasCachedSession()) {
         log(`no cached session after login (code=${result.code}); waiting 5s before retry`);
         await new Promise((r) => setTimeout(r, 5000));

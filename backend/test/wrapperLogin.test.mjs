@@ -138,3 +138,27 @@ test('cancelLogin removes creds.json and twofa.pipe', async () => {
 test('clearHardBlock and getHardBlock manage the hard-block reason', () => {
   assert.equal(getHardBlock(), null)
 })
+
+test('submit2FA emits ready when cached session already exists', async () => {
+  await cancelLogin()
+  await fsp.mkdir(path.join(tmp, 'data', 'data', 'com.apple.android.music', 'files'), {
+    recursive: true,
+  })
+  await fsp.writeFile(
+    path.join(tmp, 'data', 'data', 'com.apple.android.music', 'files', 'marker'),
+    'x',
+  )
+  events.length = 0
+  const start = await startWrapperLogin({ email: 'cached@x.com', password: 'pw' })
+  assert.equal(start.ok, true)
+  await submit2FA('123456')
+  const phases = phaseEvents().map((d) => d.phase)
+  assert.ok(phases.includes('ready'), `got: ${JSON.stringify(phases)}`)
+  await cancelLogin()
+})
+
+test('cancelLogin stops the ready poll', async () => {
+  await cancelLogin()
+  const { cancelLogin: reimportCancel } = await import('../lib/wrapperLogin.mjs')
+  await reimportCancel()
+})
