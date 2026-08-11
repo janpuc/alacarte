@@ -3,8 +3,17 @@ import path from 'node:path'
 
 import { emitEvent } from './eventBus.mjs'
 
-const WRAPPER_DATA_HOST = '/wrapper-data'
+const WRAPPER_DATA_HOST = process.env.WRAPPER_DATA_HOST || '/wrapper-data'
 const CREDS_FILE = path.join(WRAPPER_DATA_HOST, 'creds.json')
+const TWOFA_FILE = path.join(
+  WRAPPER_DATA_HOST,
+  'data',
+  'data',
+  'com.apple.android.music',
+  'files',
+  '2fa.txt',
+)
+const START_SENTINEL = path.join(WRAPPER_DATA_HOST, 'start.signal')
 
 let hardBlockReason = null
 
@@ -38,24 +47,38 @@ export async function isDockerReachable() {
   }
 }
 
+async function unlinkIfExists(p) {
+  try {
+    await fsp.unlink(p)
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') throw err
+  }
+}
+
 export async function startWrapperLogin({ email, password }) {
   if (active) return { ok: false, reason: 'login already in progress' }
 
-  active = { status: { state: 'starting', message: 'queueing credentials' } }
-  emitStatus({ state: 'starting' })
+  active = { status: { phase: 'preparing', message: 'queueing credentials' } }
+  emitStatus({ phase: 'preparing' })
 
   try {
     await fsp.mkdir(WRAPPER_DATA_HOST, { recursive: true })
+    await fsp.mkdir(path.dirname(TWOFA_FILE), { recursive: true })
+    await unlinkIfExists(START_SENTINEL)
     await fsp.writeFile(
       CREDS_FILE,
       JSON.stringify({ email, password, ts: Date.now() }),
       { mode: 0o600 },
     )
-    emitStatus({ state: 'queued', message: 'credentials written; wrapper watcher will pick up' })
+    emitStatus({
+      phase: '2fa-required',
+      message:
+        'credentials written — submit the 2FA code from your Apple device to start the wrapper',
+    })
     return { ok: true }
   } catch (err) {
     active = null
-    emitEvent('wrapper.login', { state: 'failed', message: err.message })
+    emitEvent('wrapper.login', { phase: 'failed', message: err.message })
     return { ok: false, reason: err.message }
   }
 }
@@ -63,10 +86,14 @@ export async function startWrapperLogin({ email, password }) {
 export async function submit2FA(code) {
   if (!active) return { ok: false, reason: 'no login in progress' }
   try {
-    const dir = path.join(WRAPPER_DATA_HOST, 'data', 'data', 'com.apple.android.music', 'files')
-    await fsp.mkdir(dir, { recursive: true })
-    await fsp.writeFile(path.join(dir, '2fa.txt'), code.trim(), { mode: 0o600 })
-    emitStatus({ state: 'awaiting-2fa', message: '2FA code written' })
+    await fsp.writeFile(TWOFA_FILE, code.trim(), { mode: 0o600 })
+    await fsp.writeFile(START_SENTINEL, JSON.stringify({ ts: Date.now() }), {
+      mode: 0o600,
+    })
+    emitStatus({
+      phase: 'verifying-2fa',
+      message: '2FA written — wrapper starting',
+    })
     return { ok: true }
   } catch (err) {
     return { ok: false, reason: err.message }
@@ -75,12 +102,12 @@ export async function submit2FA(code) {
 
 export async function cancelLogin() {
   active = null
-  try {
-    await fsp.unlink(CREDS_FILE)
-  } catch {
-    /* ignore */
-  }
-  emitEvent('wrapper.login', { state: 'cancelled' })
+  await Promise.all([
+    unlinkIfExists(CREDS_FILE),
+    unlinkIfExists(TWOFA_FILE),
+    unlinkIfExists(START_SENTINEL),
+  ])
+  emitEvent('wrapper.login', { phase: 'cancelled' })
   return { ok: true }
 }
 

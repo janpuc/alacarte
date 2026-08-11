@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
 const http = require('node:http');
-const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const CREDS_PATH = '/app/rootfs/data/creds.json';
-const CACHE_PATH = '/app/rootfs/data/data/com.apple.android.music/files';
+const DATA_DIR = '/app/rootfs/data';
+const CREDS_PATH = `${DATA_DIR}/creds.json`;
+const TWOFA_DIR = `${DATA_DIR}/data/data/com.apple.android.music/files`;
+const START_SENTINEL = `${DATA_DIR}/start.signal`;
+const CACHE_DIR = TWOFA_DIR;
 const WRAPPER = '/app/wrapper';
 const HEALTH_PORT = 11020;
 
+function exists(p) {
+  try {
+    fs.accessSync(p, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readCreds() {
+  if (!exists(CREDS_PATH)) return null;
   try {
     const raw = fs.readFileSync(CREDS_PATH, 'utf8');
     const creds = JSON.parse(raw);
@@ -22,32 +34,28 @@ function readCreds() {
 
 function hasCachedSession() {
   try {
-    return fs.readdirSync(CACHE_PATH).length > 0;
+    return fs.readdirSync(CACHE_DIR).length > 0;
   } catch {
     return false;
   }
 }
 
-function consumeCreds() {
+function consume(p) {
   try {
-    fs.unlinkSync(CREDS_PATH);
-  } catch {
-    /* ignore */
+    fs.unlinkSync(p);
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') throw err;
   }
 }
 
-const healthState = { alive: false, lastRestart: null, restartCount: 0 };
+const healthState = { alive: true, lastRestart: null, restartCount: 0 };
 
 const healthServer = http.createServer((req, res) => {
   if (req.url === '/healthz') {
     res.writeHead(healthState.alive ? 200 : 503);
-    res.end(
-      healthState.alive ? 'ok' : 'starting',
-    );
+    res.end(healthState.alive ? 'ok' : 'starting');
   } else if (req.url === '/readyz') {
-    const hasCreds = Boolean(readCreds());
-    const cached = hasCachedSession();
-    const ready = cached || hasCreds;
+    const ready = hasCachedSession() || Boolean(readCreds());
     res.writeHead(ready ? 200 : 503);
     res.end(ready ? 'ready' : 'no creds, no cache');
   } else {
@@ -59,7 +67,6 @@ const healthServer = http.createServer((req, res) => {
 healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
   console.log(`[watcher] health server listening on :${HEALTH_PORT}`);
 });
-healthState.alive = true;
 
 function runWrapper(args) {
   return new Promise((resolve) => {
@@ -67,61 +74,68 @@ function runWrapper(args) {
       stdio: 'inherit',
       detached: false,
     });
-    let killedByWatcher = false;
-    const interval = setInterval(() => {
-      if (fs.existsSync(CREDS_PATH)) {
-        console.log('[watcher] creds file appeared, killing wrapper');
-        killedByWatcher = true;
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 1000);
     child.on('exit', (code, signal) => {
-      clearInterval(interval);
-      resolve({ code, signal, killedByWatcher });
+      resolve({ code, signal });
     });
   });
 }
 
+async function runOnce(args, label) {
+  healthState.lastRestart = new Date().toISOString();
+  healthState.restartCount += 1;
+  console.log(`[watcher] starting wrapper (${label})`);
+  const result = await runWrapper(args);
+  console.log(
+    `[watcher] wrapper exited code=${result.code} signal=${result.signal} (${label})`,
+  );
+  return result;
+}
+
 async function main() {
-  console.log('[watcher] starting');
+  console.log('[watcher] starting; awaiting credentials and 2FA');
 
   while (true) {
     const creds = readCreds();
-    let args = [];
+    const wantsLogin = creds !== null && exists(START_SENTINEL);
 
-    if (creds) {
-      args = ['-L', `${creds.email}:${creds.password}`, '-F'];
-      console.log('[watcher] starting wrapper with credentials');
-    } else {
-      console.log(
-        hasCachedSession()
-          ? '[watcher] starting wrapper (cached session present)'
-          : '[watcher] starting wrapper (no creds, no cache yet)',
-      );
-    }
+    if (wantsLogin) {
+      consume(START_SENTINEL);
+      consume(CREDS_PATH);
+      consume(`${TWOFA_DIR}/2fa.txt`);
 
-    healthState.lastRestart = new Date().toISOString();
-    healthState.restartCount += 1;
-    const result = await runWrapper(args);
-
-    if (creds) {
-      consumeCreds();
-      console.log('[watcher] credentials consumed');
-    }
-
-    if (result.killedByWatcher) {
-      console.log('[watcher] wrapper killed for cred rotation, restarting');
+      const args = ['-L', `${creds.email}:${creds.password}`, '-F'];
+      const result = await runOnce(args, 'login');
+      if (!hasCachedSession()) {
+        console.log(
+          `[watcher] no cached session after login (code=${result.code}); waiting before retry`,
+        );
+        await new Promise((r) => setTimeout(r, 5000));
+      } else {
+        console.log('[watcher] cached session present after login; healthy');
+      }
       continue;
     }
 
-    console.log(
-      `[watcher] wrapper exited code=${result.code} signal=${result.signal}, restarting in 2s`,
-    );
-    await new Promise((r) => setTimeout(r, 2000));
+    if (creds) {
+      console.log(
+        '[watcher] creds present but no 2FA yet; waiting for user to submit 2FA',
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
+    }
+
+    if (hasCachedSession()) {
+      const result = await runOnce([], 'cached-session');
+      if (!hasCachedSession()) {
+        console.log(
+          `[watcher] cache gone after run (code=${result.code}); waiting before retry`,
+        );
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      continue;
+    }
+
+    await new Promise((r) => setTimeout(r, 1000));
   }
 }
 
